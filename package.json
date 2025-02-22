@@ -9,9 +9,11 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/client.js",
+    "start:dev": "ts-node -r dotenv/config src/client.ts",
     "pkg": "pkg . --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output client/open-bore"
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
     "ini": "^5.0.0",
     "yargs": "^17.7.2"
   },

@@ -10,24 +10,43 @@ class OpenBoreClient extends EventEmitter {
     private serverConfig: ServerConfig;
     private config: ClientConfig;
     private running: boolean = false;
-    private txBytes: number = 0;
-    private rxBytes: number = 0;
-    private lastCheck: number = Date.now();
+    private byteWindow: { tx: number[]; rx: number[]; timestamps: number[] } = { tx: [], rx: [], timestamps: [] };
 
-    constructor(config: ClientConfig, serverConfigPath: string = './open-bore.ini') {
+    constructor(config: ClientConfig, serverConfig?: ServerConfig | string) {
         super();
         this.config = config;
-        this.serverConfig = this.loadServerConfig(serverConfigPath);
+        if (typeof serverConfig === 'string') {
+            this.serverConfig = this.loadServerConfig(serverConfig);
+        } else if (serverConfig) {
+            this.serverConfig = serverConfig;
+        } else {
+            // Try .env first, then fall back to open-bore.ini
+            this.serverConfig = this.loadFromEnv() || this.loadServerConfig('./open-bore.ini');
+        }
+    }
+
+    private loadFromEnv(): ServerConfig | null {
+        const serverAddr = process.env.OPEN_BORE_SERVER_ADDR;
+        const serverPort = parseInt(process.env.OPEN_BORE_SERVER_PORT || '7000', 10);
+        const token = process.env.OPEN_BORE_TOKEN;
+        if (serverAddr && token) {
+            return { serverAddr, serverPort, token };
+        }
+        return null;
     }
 
     private loadServerConfig(path: string): ServerConfig {
-        const configData = readFileSync(path, 'utf-8');
-        const parsed = require('ini').parse(configData).common;
-        return {
-            serverAddr: parsed.server_addr,
-            serverPort: parsed.server_port,
-            token: parsed.token,
-        };
+        try {
+            const configData = readFileSync(path, 'utf-8');
+            const parsed = require('ini').parse(configData).common;
+            return {
+                serverAddr: parsed.server_addr,
+                serverPort: parsed.server_port,
+                token: parsed.token,
+            };
+        } catch (e: any) {
+            throw new Error(`Failed to load server config from ${path}: ${e.message}`);
+        }
     }
 
     start() {
@@ -73,7 +92,7 @@ class OpenBoreClient extends EventEmitter {
 
     private handleControlData(data: Buffer) {
         const msg = JSON.parse(data.toString().trim());
-        this.rxBytes += data.length;
+        this.updateByteWindow(data.length, 0);
 
         if (msg.type === 'LoginResp' && msg.content.error === '') {
             console.log('Login successful');
@@ -103,7 +122,7 @@ class OpenBoreClient extends EventEmitter {
         });
 
         this.proxySocket.on('data', (data) => {
-            this.rxBytes += data.length;
+            this.updateByteWindow(data.length, 0);
             if (this.localSocket) this.localSocket.write(data);
         });
         this.proxySocket.on('error', (err) => console.error(`Proxy socket error: ${err.message}`));
@@ -113,7 +132,7 @@ class OpenBoreClient extends EventEmitter {
             console.log(`Local connection to ${this.config.localPort} established`);
         });
         this.localSocket.on('data', (data) => {
-            this.txBytes += data.length;
+            this.updateByteWindow(0, data.length);
             if (this.proxySocket) this.proxySocket.write(data);
         });
         this.localSocket.on('error', (err) => console.error(`Local socket error: ${err.message}`));
@@ -158,25 +177,41 @@ class OpenBoreClient extends EventEmitter {
         }
     }
 
+    private updateByteWindow(rx: number, tx: number) {
+        const now = Date.now();
+        this.byteWindow.rx.push(rx);
+        this.byteWindow.tx.push(tx);
+        this.byteWindow.timestamps.push(now);
+
+        while (this.byteWindow.timestamps[0] < now - 1000) {
+            this.byteWindow.rx.shift();
+            this.byteWindow.tx.shift();
+            this.byteWindow.timestamps.shift();
+        }
+    }
+
     private monitorSpeeds() {
         setInterval(() => {
             const now = Date.now();
-            const elapsed = (now - this.lastCheck) / 1000;
-            const txSpeed = (this.txBytes * 8) / elapsed; // Bits/sec
-            const rxSpeed = (this.rxBytes * 8) / elapsed; // Bits/sec
+            const windowDuration = (now - (this.byteWindow.timestamps[0] || now)) / 1000 || 1;
+            const txTotal = this.byteWindow.tx.reduce((sum, bytes) => sum + bytes, 0);
+            const rxTotal = this.byteWindow.rx.reduce((sum, bytes) => sum + bytes, 0);
+            const txSpeed = (txTotal * 8) / windowDuration; // Bits/sec
+            const rxSpeed = (rxTotal * 8) / windowDuration; // Bits/sec
             this.emit('speed', { tx: txSpeed, rx: rxSpeed });
-            this.txBytes = 0;
-            this.rxBytes = 0;
-            this.lastCheck = now;
-        }, 5000);
+        }, 100);
     }
 
     getSendSpeed(): number {
-        return this.txBytes * 8; // Bits for last interval
+        const windowDuration = (Date.now() - (this.byteWindow.timestamps[0] || Date.now())) / 1000 || 1;
+        const txTotal = this.byteWindow.tx.reduce((sum, bytes) => sum + bytes, 0);
+        return (txTotal * 8) / windowDuration; // Bits/sec
     }
 
     getRecSpeed(): number {
-        return this.rxBytes * 8; // Bits for last interval
+        const windowDuration = (Date.now() - (this.byteWindow.timestamps[0] || Date.now())) / 1000 || 1;
+        const rxTotal = this.byteWindow.rx.reduce((sum, bytes) => sum + bytes, 0);
+        return (rxTotal * 8) / windowDuration; // Bits/sec
     }
 }
 
