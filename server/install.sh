@@ -9,7 +9,7 @@ fi
 echo "Welcome to the FRP Server Setup!"
 
 # Prompt for domain
-read -p "Enter your domain (e.g., easydevfrp.com): " DOMAIN
+read -p "Enter your domain (e.g., example.com): " DOMAIN
 if [ -z "$DOMAIN" ]; then
   echo "Domain cannot be empty!"
   exit 1
