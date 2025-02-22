@@ -15,6 +15,17 @@ if [ -z "$DOMAIN" ]; then
   exit 1
 fi
 
+# Prompt for custom token (optional)
+read -p "Enter a custom token (leave blank for random): " CUSTOM_TOKEN
+if [ -z "$CUSTOM_TOKEN" ]; then
+  # Generate a random 32-character token
+  TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 32)
+  echo "Generated random token: $TOKEN"
+else
+  TOKEN="$CUSTOM_TOKEN"
+  echo "Using custom token: $TOKEN"
+fi
+
 # Install dependencies
 echo "Installing dependencies..."
 apt update
@@ -27,12 +38,13 @@ tar -xzf frp_0.58.0_linux_amd64.tar.gz
 mv frp_0.58.0_linux_amd64/frps /usr/local/bin/
 rm -rf frp_0.58.0_linux_amd64*
 
-# Create config directory and file
+# Create config directory and file with token
 mkdir -p /etc/frp
 cat << EOF > /etc/frp/frps.ini
 [common]
 bind_port = 7000
 vhost_https_port = 443
+token = $TOKEN
 log_file = /var/log/frps.log
 log_level = info
 log_max_days = 7
@@ -111,5 +123,7 @@ systemctl daemon-reload
 systemctl enable frps frps-watchdog iptables-persistent
 systemctl start frps frps-watchdog
 
-echo "FRP Server installed! Check status with: sudo systemctl status frps"
-echo "Note: Ensure VCN Security List allows TCP 7000 and 443 in Oracle Cloud Console."
+echo "FRP Server installed!"
+echo "Token: $TOKEN (Save this for your client config!)"
+echo "Check status with: sudo systemctl status frps"
+echo "Note: In Oracle Cloud Console, add VCN Security List ingress rules for TCP 7000 and 443."
