@@ -2,12 +2,21 @@
   "name": "open-bore",
   "version": "1.0.0",
   "description": "",
-  "main": "dist/index.js",
-  "scripts": {
-    "build": "tsc"
+  "main": "dist/client.js",
+  "bin": {
+    "open-bore": "./dist/client.js"
   },
-  "dependencies": {},
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/client.js",
+    "pkg": "pkg . --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output client/open-bore"
+  },
+  "dependencies": {
+    "ini": "^5.0.0",
+    "yargs": "^17.7.2"
+  },
   "devDependencies": {
+    "@types/ini": "^4.1.1",
     "typescript": "^5.5.3"
   },
   "private": true
