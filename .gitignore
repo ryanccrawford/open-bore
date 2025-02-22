@@ -12,3 +12,5 @@ yarn-error.log*
 .vscode/*
 .DS_Store
 package-lock.json
+dist/
+open-bore.ini
