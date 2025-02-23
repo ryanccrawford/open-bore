@@ -1,27 +1,39 @@
 import { EventEmitter } from 'events';
-import { Socket, connect } from 'net';
-import { readFileSync } from 'fs';
+import { spawn, ChildProcess } from 'child_process';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { platform } from 'os';
 import { ServerConfig, ClientConfig, SpeedStats } from './types';
 
 class OpenBoreClient extends EventEmitter {
-    private controlSocket: Socket | null = null;
-    private proxySocket: Socket | null = null;
-    private localSocket: Socket | null = null;
-    private serverConfig: ServerConfig;
+    private frpcProcess: ChildProcess | null = null;
+    private serverConfig: ServerConfig | null = null; // Nullable until start
     private config: ClientConfig;
     private running: boolean = false;
     private byteWindow: { tx: number[]; rx: number[]; timestamps: number[] } = { tx: [], rx: [], timestamps: [] };
+    private frpcPath: string;
 
     constructor(config: ClientConfig, serverConfig?: ServerConfig | string) {
         super();
         this.config = config;
+
+        const plat = platform();
+        const frpcName = plat === 'win32' ? 'frpc-win.exe' : plat === 'darwin' ? 'frpc-macos' : 'frpc-linux';
+        this.frpcPath = join(__dirname, '..', 'client', frpcName);
+        if (!existsSync(this.frpcPath)) {
+            this.frpcPath = join(__dirname, '..', 'frpc'); // Dev fallback
+        }
+
         if (typeof serverConfig === 'string') {
             this.serverConfig = this.loadServerConfig(serverConfig);
         } else if (serverConfig) {
             this.serverConfig = serverConfig;
         } else {
-            // Try .env first, then fall back to open-bore.ini
-            this.serverConfig = this.loadFromEnv() || this.loadServerConfig('./open-bore.ini');
+            this.serverConfig = this.loadFromEnv() || this.loadServerConfigSafe('./open-bore.ini');
+        }
+
+        if (!this.serverConfig) {
+            console.log('No server config provided—will use open-bore.ini if present at runtime');
         }
     }
 
@@ -36,138 +48,88 @@ class OpenBoreClient extends EventEmitter {
     }
 
     private loadServerConfig(path: string): ServerConfig {
+        const configData = readFileSync(path, 'utf-8');
+        const parsed = require('ini').parse(configData).common;
+        return {
+            serverAddr: parsed.server_addr,
+            serverPort: parsed.server_port,
+            token: parsed.token,
+        };
+    }
+
+    private loadServerConfigSafe(path: string): ServerConfig | null {
         try {
-            const configData = readFileSync(path, 'utf-8');
-            const parsed = require('ini').parse(configData).common;
-            return {
-                serverAddr: parsed.server_addr,
-                serverPort: parsed.server_port,
-                token: parsed.token,
-            };
+            return this.loadServerConfig(path);
         } catch (e: any) {
+            if (e.code === 'ENOENT') {
+                return null;
+            }
             throw new Error(`Failed to load server config from ${path}: ${e.message}`);
         }
     }
 
     start() {
         if (this.running) return;
-        this.connectControl();
-    }
 
-    private connectControl() {
-        this.controlSocket = connect(this.serverConfig.serverPort, this.serverConfig.serverAddr, () => {
-            console.log('Connected to server');
-            this.sendLogin();
+        // Ensure serverConfig is loaded or fail gracefully
+        if (!this.serverConfig) {
+            this.serverConfig = this.loadServerConfigSafe('./open-bore.ini');
+            if (!this.serverConfig) {
+                console.error('No server config found—please create open-bore.ini or set environment variables');
+                return;
+            }
+        }
+
+        console.log('Starting frpc...');
+
+        // Type assertion safe here—serverConfig is guaranteed non-null
+        const configIni = `
+[common]
+server_addr = ${(this.serverConfig as ServerConfig).serverAddr}
+server_port = ${(this.serverConfig as ServerConfig).serverPort}
+token = ${(this.serverConfig as ServerConfig).token}
+log_level = debug
+
+[${this.config.subdomain}]
+type = https
+local_port = ${this.config.localPort}
+custom_domains = ${this.config.subdomain}.${(this.serverConfig as ServerConfig).serverAddr}
+`;
+        writeFileSync('frpc.ini', configIni);
+
+        this.frpcProcess = spawn(this.frpcPath, ['-c', 'frpc.ini'], { stdio: 'pipe' });
+
+        this.frpcProcess.stdout?.on('data', (data) => {
+            const msg = data.toString();
+            console.log(`frpc stdout: ${msg}`);
+            if (msg.includes('login to server success')) {
+                this.running = true;
+                this.emit('connected', this);
+            }
+            this.updateByteWindow(data.length, 0);
         });
 
-        this.controlSocket.on('data', (data) => this.handleControlData(data));
-        this.controlSocket.on('error', (err) => {
-            console.error(`Control socket error: ${err.message}`);
+        this.frpcProcess.stderr?.on('data', (data) => {
+            console.error(`frpc stderr: ${data.toString()}`);
+            this.updateByteWindow(data.length, 0);
+        });
+
+        this.frpcProcess.on('close', (code) => {
+            console.log(`frpc exited with code ${code}`);
+            this.running = false;
+            this.emit('disconnected');
             this.reconnect();
-        });
-        this.controlSocket.on('close', () => {
-            console.log('Control socket closed');
-            this.cleanup();
         });
 
         this.monitorSpeeds();
     }
 
-    private sendLogin() {
-        const loginMsg = {
-            type: 'Login',
-            version: '0.58.0',
-            hostname: this.serverConfig.serverAddr,
-            os: process.platform,
-            arch: process.arch,
-            user: '',
-            privilegeKey: '',
-            timestamp: Math.floor(Date.now() / 1000),
-            runId: '',
-            poolCount: 1,
-            token: this.serverConfig.token,
-        };
-        this.controlSocket?.write(JSON.stringify(loginMsg) + '\n');
-    }
-
-    private handleControlData(data: Buffer) {
-        const msg = JSON.parse(data.toString().trim());
-        this.updateByteWindow(data.length, 0);
-
-        if (msg.type === 'LoginResp' && msg.content.error === '') {
-            console.log('Login successful');
-            this.running = true;
-            this.emit('connected', this);
-            this.registerProxy();
-        } else if (msg.type === 'NewProxyResp') {
-            this.startProxy(msg.content.proxyId);
-        }
-    }
-
-    private registerProxy() {
-        const proxyMsg = {
-            type: 'NewProxy',
-            proxyName: this.config.subdomain,
-            proxyType: 'https',
-            remotePort: 443,
-            customDomains: [`${this.config.subdomain}.${this.serverConfig.serverAddr}`],
-        };
-        this.controlSocket?.write(JSON.stringify(proxyMsg) + '\n');
-    }
-
-    private startProxy(proxyId: string) {
-        this.proxySocket = connect(this.serverConfig.serverPort, this.serverConfig.serverAddr, () => {
-            console.log(`Proxy ${this.config.subdomain} connected`);
-            this.sendWorkConn(proxyId);
-        });
-
-        this.proxySocket.on('data', (data) => {
-            this.updateByteWindow(data.length, 0);
-            if (this.localSocket) this.localSocket.write(data);
-        });
-        this.proxySocket.on('error', (err) => console.error(`Proxy socket error: ${err.message}`));
-        this.proxySocket.on('close', () => this.cleanup());
-
-        this.localSocket = connect(this.config.localPort, '127.0.0.1', () => {
-            console.log(`Local connection to ${this.config.localPort} established`);
-        });
-        this.localSocket.on('data', (data) => {
-            this.updateByteWindow(0, data.length);
-            if (this.proxySocket) this.proxySocket.write(data);
-        });
-        this.localSocket.on('error', (err) => console.error(`Local socket error: ${err.message}`));
-        this.localSocket.on('close', () => this.cleanup());
-    }
-
-    private sendWorkConn(proxyId: string) {
-        const workConnMsg = {
-            type: 'NewWorkConn',
-            runId: '',
-            proxyId: proxyId,
-        };
-        this.proxySocket?.write(JSON.stringify(workConnMsg) + '\n');
-    }
-
     stop() {
-        if (this.controlSocket) {
-            this.controlSocket.end();
-            this.controlSocket = null;
-        }
-        if (this.proxySocket) {
-            this.proxySocket.end();
-            this.proxySocket = null;
-        }
-        if (this.localSocket) {
-            this.localSocket.end();
-            this.localSocket = null;
+        if (this.frpcProcess) {
+            this.frpcProcess.kill('SIGTERM');
+            this.frpcProcess = null;
         }
         this.running = false;
-    }
-
-    private cleanup() {
-        this.stop();
-        this.emit('disconnected');
-        this.reconnect();
     }
 
     private reconnect() {
@@ -196,8 +158,8 @@ class OpenBoreClient extends EventEmitter {
             const windowDuration = (now - (this.byteWindow.timestamps[0] || now)) / 1000 || 1;
             const txTotal = this.byteWindow.tx.reduce((sum, bytes) => sum + bytes, 0);
             const rxTotal = this.byteWindow.rx.reduce((sum, bytes) => sum + bytes, 0);
-            const txSpeed = (txTotal * 8) / windowDuration; // Bits/sec
-            const rxSpeed = (rxTotal * 8) / windowDuration; // Bits/sec
+            const txSpeed = (txTotal * 8) / windowDuration;
+            const rxSpeed = (rxTotal * 8) / windowDuration;
             this.emit('speed', { tx: txSpeed, rx: rxSpeed });
         }, 100);
     }
@@ -205,17 +167,16 @@ class OpenBoreClient extends EventEmitter {
     getSendSpeed(): number {
         const windowDuration = (Date.now() - (this.byteWindow.timestamps[0] || Date.now())) / 1000 || 1;
         const txTotal = this.byteWindow.tx.reduce((sum, bytes) => sum + bytes, 0);
-        return (txTotal * 8) / windowDuration; // Bits/sec
+        return (txTotal * 8) / windowDuration;
     }
 
     getRecSpeed(): number {
         const windowDuration = (Date.now() - (this.byteWindow.timestamps[0] || Date.now())) / 1000 || 1;
         const rxTotal = this.byteWindow.rx.reduce((sum, bytes) => sum + bytes, 0);
-        return (rxTotal * 8) / windowDuration; // Bits/sec
+        return (rxTotal * 8) / windowDuration;
     }
 }
 
-// CLI Usage
 const args = require('yargs')
     .option('subdomain', { alias: 's', type: 'string', demandOption: true, description: 'Subdomain to use' })
     .option('port', { alias: 'p', type: 'number', default: 3000, description: 'Local port to forward' })

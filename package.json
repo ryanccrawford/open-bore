@@ -3,22 +3,21 @@
   "version": "1.0.0",
   "description": "",
   "main": "dist/client.js",
-  "bin": {
-    "open-bore": "./dist/client.js"
-  },
+  "bin": "dist/client.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/client.js",
     "start:dev": "ts-node -r dotenv/config src/client.ts",
-    "pkg": "pkg . --targets node18-linux-x64,node18-macos-x64,node18-win-x64 --output client/open-bore"
+    "pkg": "pkg dist/client.js --targets node18-linux-x64,node18-macos-x64 --output client/open-bore --assets client/frpc-linux,client/frpc-macos"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
     "ini": "^5.0.0",
+    "pkg": "^5.8.1",
     "yargs": "^17.7.2"
   },
   "devDependencies": {
-    "@types/ini": "^4.1.1",
+    "ts-node": "^10.9.2",
     "typescript": "^5.5.3"
   },
   "private": true
