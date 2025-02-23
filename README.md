@@ -5,7 +5,7 @@ A custom tunneling client built in TypeScript, wrapping the FRP (`frpc`) client 
 ## Features
 - **Secure Tunneling**: Maps local ports to public subdomains over HTTPS.
 - **Speed Monitoring**: Logs basic throughput (extendable for tunnel stats).
-- **Cross-Platform**: Single executable for Linux, macOS, Windows.
+- **Cross-Platform**: Single executable for Linux, macOS.
 - **Easy Install**: Script creates config file (`open-bore.ini`) with user input.
 
 ## Installation
