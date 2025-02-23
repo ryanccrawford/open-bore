@@ -10,20 +10,20 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        target: [node18-linux-x64, node18-macos-x64, node18-win-x64]
+        target: [node18-linux-x64, node18-macos-x64]
 
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v3
         with:
-          node-version: 18
+          node-version: 22
       - run: npm install -g pkg
       - run: npm install
       - run: npm run build
       - run: pkg . --targets ${{ matrix.target }} --output client/open-bore-${{ matrix.target }}
       - name: Rename binaries
         run: |
-          mv client/open-bore-${{ matrix.target }} client/open-bore-${{ matrix.target == 'node18-win-x64' && 'win.exe' || matrix.target == 'node18-linux-x64' && 'linux' || 'macos' }}
+          mv client/open-bore-${{ matrix.target }} client/open-bore-${{ matrix.target == 'node18-linux-x64' && 'linux' || 'macos' }}
       - uses: actions/upload-artifact@v3
         with:
           name: binaries
@@ -44,6 +44,5 @@ jobs:
           files: |
             client/open-bore-linux
             client/open-bore-macos
-            client/open-bore-win.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
