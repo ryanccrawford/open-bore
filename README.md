@@ -1,5 +1,4 @@
 # Open Bore
-
 A custom tunneling client built in TypeScript, wrapping the FRP (`frpc`) client to expose local services securely via a public FRP server. Binaries include `frpc` v0.58.0—no separate downloads needed.
 
 ## Features
