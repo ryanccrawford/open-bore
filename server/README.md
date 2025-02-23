@@ -10,7 +10,7 @@ This script sets up a robust FRP server (`frps`) on an Oracle Cloud instance wit
 1. SSH into your Oracle Cloud instance.
 2. Run:
    ```bash
-   wget -qO- https://raw.githubusercontent.com/[YOUR_GITHUB_USERNAME]/frp-server-setup/main/install-frps.sh | bash
+   wget -qO- https://raw.githubusercontent.com/ryanccrawford/server/main/install.sh | bash
 
 3. Follow the interactive prompt to enter your domain.
 4. The script:
