@@ -1,17 +1,21 @@
 import { EventEmitter } from 'events';
 import { spawn, ChildProcess } from 'child_process';
 import { readFileSync, writeFileSync, existsSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
 import { platform } from 'os';
 import { ServerConfig, ClientConfig, SpeedStats } from './types';
 
+import http from 'http'; // Import the http module
+
 class OpenBoreClient extends EventEmitter {
     private frpcProcess: ChildProcess | null = null;
-    private serverConfig: ServerConfig | null = null; // Nullable until start
+    private serverConfig: ServerConfig | null = null;
     private config: ClientConfig;
     private running: boolean = false;
     private byteWindow: { tx: number[]; rx: number[]; timestamps: number[] } = { tx: [], rx: [], timestamps: [] };
     private frpcPath: string;
+    private server: http.Server | null = null; // Add a server property
+
 
     constructor(config: ClientConfig, serverConfig?: ServerConfig | string) {
         super();
@@ -19,9 +23,9 @@ class OpenBoreClient extends EventEmitter {
 
         const plat = platform();
         const frpcName = plat === 'win32' ? 'frpc-win.exe' : plat === 'darwin' ? 'frpc-macos' : 'frpc-linux';
-        this.frpcPath = join(__dirname, '..', 'client', frpcName);
+        this.frpcPath = join(dirname(process.execPath), 'client', frpcName);
         if (!existsSync(this.frpcPath)) {
-            this.frpcPath = join(__dirname, '..', 'frpc'); // Dev fallback
+            this.frpcPath = join(__dirname, '..', 'frpc');
         }
 
         if (typeof serverConfig === 'string') {
@@ -30,10 +34,6 @@ class OpenBoreClient extends EventEmitter {
             this.serverConfig = serverConfig;
         } else {
             this.serverConfig = this.loadFromEnv() || this.loadServerConfigSafe('./open-bore.ini');
-        }
-
-        if (!this.serverConfig) {
-            console.log('No server config provided—will use open-bore.ini if present at runtime');
         }
     }
 
@@ -71,30 +71,34 @@ class OpenBoreClient extends EventEmitter {
     start() {
         if (this.running) return;
 
-        // Ensure serverConfig is loaded or fail gracefully
         if (!this.serverConfig) {
             this.serverConfig = this.loadServerConfigSafe('./open-bore.ini');
             if (!this.serverConfig) {
-                console.error('No server config found—please create open-bore.ini or set environment variables');
+                console.error('No server config found—please create open-bore.ini, set environment variables, or use --server-addr, --server-port, --token');
                 return;
             }
         }
 
         console.log('Starting frpc...');
+        console.log('Subdomain:', this.config.subdomain);
+        console.log('Local Port:', this.config.localPort);
 
-        // Type assertion safe here—serverConfig is guaranteed non-null
+        const serverConfig = this.serverConfig as ServerConfig;
+        const subdomain = Array.isArray(this.config.subdomain) ? this.config.subdomain[0] : this.config.subdomain;
+        const localPort = Array.isArray(this.config.localPort) ? this.config.localPort[0] : this.config.localPort;
+
         const configIni = `
 [common]
-server_addr = ${(this.serverConfig as ServerConfig).serverAddr}
-server_port = ${(this.serverConfig as ServerConfig).serverPort}
-token = ${(this.serverConfig as ServerConfig).token}
+server_addr = ${serverConfig.serverAddr}
+server_port = ${serverConfig.serverPort}
+token = ${serverConfig.token}
 log_level = debug
 
-[${this.config.subdomain}]
-type = https
-local_port = ${this.config.localPort}
-custom_domains = ${this.config.subdomain}.${(this.serverConfig as ServerConfig).serverAddr}
-`;
+[${subdomain}]
+type = http
+local_port = ${localPort}
+subdomain = ${subdomain}
+`.trim();
         writeFileSync('frpc.ini', configIni);
 
         this.frpcProcess = spawn(this.frpcPath, ['-c', 'frpc.ini'], { stdio: 'pipe' });
@@ -122,6 +126,7 @@ custom_domains = ${this.config.subdomain}.${(this.serverConfig as ServerConfig).
         });
 
         this.monitorSpeeds();
+        this.startProxyServer();
     }
 
     stop() {
@@ -175,16 +180,70 @@ custom_domains = ${this.config.subdomain}.${(this.serverConfig as ServerConfig).
         const rxTotal = this.byteWindow.rx.reduce((sum, bytes) => sum + bytes, 0);
         return (rxTotal * 8) / windowDuration;
     }
+
+    private startProxyServer() {
+        this.server = http.createServer((req, res) => {
+            let body = '';
+            req.on('data', (chunk) => {
+                body += chunk;
+            });
+            req.on('end', () => {
+                // Log the request method, URL, headers, and body
+                console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+                console.log('Headers:', req.headers);
+                console.log('Body:', body);
+
+                // Forward the request to the local port.
+                const localReq = http.request({
+                    host: 'localhost',
+                    port: this.config.localPort,
+                    method: req.method,
+                    path: req.url,
+                    headers: req.headers,
+                }, (localRes) => {
+                    // Passthrough the headers and status code from the local server.
+                    res.writeHead(localRes.statusCode || 200, localRes.headers);
+                    localRes.pipe(res); // Pipe the response from the local server to the client.
+                });
+
+                // Handle errors on the local request
+                localReq.on('error', (err) => {
+                    console.error(`Error forwarding to local port ${this.config.localPort}:`, err);
+                    res.writeHead(500, { 'Content-Type': 'text/plain' });
+                    res.end(`Error forwarding request: ${err.message}`);
+                });
+
+                // Send the body of the incoming request to the local server
+                localReq.end(body);
+            });
+        });
+
+        this.server.listen(0, () => { // Listen on a random available port
+            const addr = this.server?.address();
+            const port = typeof addr === 'string' ? 0 : addr?.port || 0;
+            console.log(`Proxy server listening on port ${port}`);
+        });
+    }
+
 }
 
 const args = require('yargs')
-    .option('subdomain', { alias: 's', type: 'string', demandOption: true, description: 'Subdomain to use' })
-    .option('port', { alias: 'p', type: 'number', default: 3000, description: 'Local port to forward' })
+    .option('subdomain', { alias: 's', type: 'string', demandOption: true, array: false, description: 'Subdomain to use' })
+    .option('port', { alias: 'p', type: 'number', demandOption: true, array: false, description: 'Local port to forward' })
+    .option('server-addr', { type: 'string', description: 'Server address (e.g., easydevfrp.com)' })
+    .option('server-port', { type: 'number', default: 7000, description: 'Server port' })
+    .option('token', { type: 'string', description: 'Server token' })
     .option('showspeed', { type: 'boolean', default: false, description: 'Show speed stats' })
+    .strict()
     .argv;
 
 if (require.main === module) {
-    const client = new OpenBoreClient({ subdomain: args.subdomain, localPort: args.port });
+    const serverConfig = args.serverAddr && args.token ? {
+        serverAddr: args.serverAddr,
+        serverPort: args.serverPort,
+        token: args.token
+    } : undefined;
+    const client = new OpenBoreClient({ subdomain: args.subdomain, localPort: args.port }, serverConfig);
     client.on('connected', () => console.log('Client is connected'));
     if (args.showspeed) {
         client.on('speed', (speeds: SpeedStats) => {
